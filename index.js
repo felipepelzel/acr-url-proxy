@@ -1,45 +1,33 @@
 const express = require('express');
 const cors = require('cors');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 const fetch = require('node-fetch');
 const FormData = require('form-data');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// Instalar yt-dlp al arrancar si no existe
 async function ensureYtDlp() {
   try {
     await execAsync('yt-dlp --version');
-    console.log('yt-dlp already installed');
+    console.log('yt-dlp ready');
   } catch {
     console.log('Installing yt-dlp...');
-    try {
-      await execAsync('pip3 install yt-dlp');
-      console.log('yt-dlp installed via pip3');
-    } catch {
-      try {
-        await execAsync('pip install yt-dlp');
-        console.log('yt-dlp installed via pip');
-      } catch {
-        // Descargar binario directamente
-        console.log('Downloading yt-dlp binary...');
-        await execAsync('curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp');
-        console.log('yt-dlp binary installed');
-      }
+    try { await execAsync('pip3 install yt-dlp'); } catch {
+      await execAsync('curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod a+rx /usr/local/bin/yt-dlp');
     }
   }
 }
 
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'ACR URL Proxy v3' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'ACR URL Proxy v4' }));
 
 app.get('/health', async (req, res) => {
   try {
@@ -51,29 +39,48 @@ app.get('/health', async (req, res) => {
 });
 
 app.post('/analyze', async (req, res) => {
-  const { url, acr_host, access_key, access_secret } = req.body;
+  let { url, acr_host, access_key, access_secret } = req.body;
   if (!url || !acr_host || !access_key || !access_secret) {
     return res.status(400).json({ error: 'Missing fields' });
+  }
+
+  // Normalizar URLs de TikTok
+  if (url.includes('tiktok.com')) {
+    url = url
+      .replace('http://tiktok.com', 'https://www.tiktok.com')
+      .replace('https://tiktok.com', 'https://www.tiktok.com')
+      .replace('http://www.tiktok.com', 'https://www.tiktok.com');
   }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'acr-'));
   const outTemplate = path.join(tmpDir, 'audio.%(ext)s');
 
   try {
-    // Normalizar URL de TikTok
-    if (url.includes("tiktok.com")) {
-      url = url.replace("http://tiktok.com", "https://www.tiktok.com")
-             .replace("https://tiktok.com", "https://www.tiktok.com")
-             .replace("http://www.tiktok.com", "https://www.tiktok.com");
-    }
-    console.log("Downloading:", url);
+    console.log('Downloading:', url);
 
     const cmd = `yt-dlp --no-playlist --extract-audio --audio-format mp3 --audio-quality 5 --output "${outTemplate}" --no-warnings --quiet "${url}"`;
-    await execAsync(cmd, { timeout: 90000 });
+    
+    try {
+      await execAsync(cmd, { timeout: 90000 });
+    } catch(dlErr) {
+      // No se pudo descargar — devolver respuesta especial "no verificable"
+      console.log('Download failed:', dlErr.message.slice(0, 100));
+      return res.json({
+        status: { code: 2000, msg: 'No verificable' },
+        metadata: {},
+        _download_error: true
+      });
+    }
 
     const files = fs.readdirSync(tmpDir);
     const audioFile = files.find(f => /\.(mp3|m4a|webm|ogg|opus)$/.test(f));
-    if (!audioFile) throw new Error('No audio file downloaded');
+    if (!audioFile) {
+      return res.json({
+        status: { code: 2000, msg: 'No verificable' },
+        metadata: {},
+        _download_error: true
+      });
+    }
 
     let audioBuffer = fs.readFileSync(path.join(tmpDir, audioFile));
     console.log('Audio:', audioBuffer.length, 'bytes');
@@ -110,6 +117,6 @@ async function sendToACRCloud(audioBuffer, host, key, secret) {
 }
 
 app.listen(PORT, async () => {
-  console.log(`ACR URL Proxy v3 running on port ${PORT}`);
+  console.log(`ACR URL Proxy v4 running on port ${PORT}`);
   await ensureYtDlp();
 });
