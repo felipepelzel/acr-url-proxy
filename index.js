@@ -60,7 +60,13 @@ app.post('/analyze', async (req, res) => {
   const outTemplate = path.join(tmpDir, 'audio.%(ext)s');
 
   try {
-    console.log('Downloading:', url);
+    // Normalizar URL de TikTok
+    if (url.includes("tiktok.com")) {
+      url = url.replace("http://tiktok.com", "https://www.tiktok.com")
+             .replace("https://tiktok.com", "https://www.tiktok.com")
+             .replace("http://www.tiktok.com", "https://www.tiktok.com");
+    }
+    console.log("Downloading:", url);
 
     const cmd = `yt-dlp --no-playlist --extract-audio --audio-format mp3 --audio-quality 5 --output "${outTemplate}" --no-warnings --quiet "${url}"`;
     await execAsync(cmd, { timeout: 90000 });
