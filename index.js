@@ -68,7 +68,19 @@ app.post('/score', async (req, res) => {
     // 1. Descargar video
     const dlCmd = `yt-dlp --no-playlist --format "worst[ext=mp4]/worst" --output "${path.join(tmpDir,'video.%(ext)s')}" --no-warnings --quiet "${url}"`;
     try { await execAsync(dlCmd, { timeout: 120000 }); }
-    catch(dlErr) { return res.status(500).json({ error: 'No se pudo descargar el video: ' + dlErr.message.slice(0,200) }); }
+    catch(dlErr) { const dlMsg = dlErr.message || '';
+      let friendlyErr = 'No se pudo descargar el video.';
+      if (/private/i.test(dlMsg)) friendlyErr = 'El video es privado. Solo funcionan videos publicos.';
+      else if (/age/i.test(dlMsg)) friendlyErr = 'El video tiene restriccion de edad y no puede descargarse.';
+      else if (/unavailable|not available/i.test(dlMsg)) friendlyErr = 'El video no esta disponible o fue eliminado.';
+      else if (/404|does not exist/i.test(dlMsg)) friendlyErr = 'URL no encontrada. Verifica que el link sea correcto.';
+      else if (/geo|country/i.test(dlMsg)) friendlyErr = 'El video esta bloqueado por region geografica.';
+      else if (/copyright|blocked/i.test(dlMsg)) friendlyErr = 'El video esta bloqueado por copyright.';
+      else if (/timeout|timed out/i.test(dlMsg)) friendlyErr = 'Tiempo de descarga agotado. El video puede ser muy largo.';
+      else if (/instagram/i.test(dlMsg)) friendlyErr = 'Instagram: solo funciona con cuentas publicas y reels publicos.';
+      else if (/login|sign in/i.test(dlMsg)) friendlyErr = 'Este video requiere login para verse. Solo se pueden analizar videos publicos.';
+      else friendlyErr = 'Error de descarga: ' + dlMsg.slice(0, 200);
+      return res.status(500).json({ error: friendlyErr }); }
 
     const files = fs.readdirSync(tmpDir);
     const videoFile = files.find(f => /\.(mp4|webm|mkv|mov|m4v)$/.test(f));
@@ -94,6 +106,15 @@ app.post('/score', async (req, res) => {
     const framesDir = path.join(tmpDir, 'frames');
     fs.mkdirSync(framesDir);
     const frames = [];
+    // Thumbnail para mostrar en la UI
+    let thumbnailB64 = null;
+    try {
+      const thumbPath = path.join(framesDir, 'thumb.jpg');
+      const thumbTs = Math.min(1.5, duration * 0.1);
+      await execAsync(`ffmpeg -ss ${thumbTs.toFixed(2)} -i "${fullVideoPath}" -frames:v 1 -q:v 3 -vf scale=320:-1 "${thumbPath}" -y -loglevel quiet`);
+      if (fs.existsSync(thumbPath)) thumbnailB64 = fs.readFileSync(thumbPath).toString('base64');
+    } catch(e) { console.log('Thumb failed'); }
+
     const frameConfig = [
       { t: 0.5, label: 'FRAME 1 — HOOK (primer segundo)' },
       { t: duration * 0.20, label: 'FRAME 2 — 20% (desarrollo inicial)' },
@@ -266,16 +287,25 @@ Respondé EXCLUSIVAMENTE con este JSON (sin markdown, sin texto adicional):
       headers: { 'Content-Type': 'application/json', 'x-api-key': anthropic_key, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 2000, messages: [{ role: 'user', content: messageContent }] })
     });
-    if (!claudeRes.ok) { const e = await claudeRes.text(); throw new Error('Claude API ' + claudeRes.status + ': ' + e.slice(0,200)); }
+    if (!claudeRes.ok) { const e = await claudeRes.text(); const st = claudeRes.status;
+      let apiErr = 'Error de analisis IA.';
+      if (st === 401) apiErr = 'API Key de Anthropic invalida o expirada. Verifica las credenciales en Configuracion.';
+      else if (st === 429) apiErr = 'Limite de requests alcanzado. Espera unos segundos y reintenta.';
+      else if (st === 400) apiErr = 'Error procesando las imagenes del video. Reintenta.';
+      else if (st >= 500) apiErr = 'Servicio de IA temporalmente no disponible. Reintenta en un momento.';
+      else apiErr = 'Error API Anthropic (' + st + '): ' + e.slice(0,150);
+      throw new Error(apiErr); }
     const claudeData = await claudeRes.json();
     const rawText = claudeData.content?.[0]?.text || '';
     const result = JSON.parse(rawText.replace(/```json|```/g,'').trim());
     console.log('Score:', result.overall_score, '| Grade:', result.overall_grade, '| Stars:', result.star_rating);
-    res.json({ ...result, _frames_used: frames.length, _duration: Math.round(duration), _meta: { title: videoMeta.title, views: videoMeta.view_count, likes: videoMeta.like_count } });
+    res.json({ ...result, _frames_used: frames.length, _duration: Math.round(duration), _thumbnail: thumbnailB64, _meta: { title: videoMeta.title, views: videoMeta.view_count, likes: videoMeta.like_count } });
 
   } catch(err) {
     console.error('Score error:', err.message);
-    res.status(500).json({ error: err.message });
+    let errMsg = err.message || 'Error desconocido';
+    if (/JSON|parse|Unexpected/i.test(errMsg)) errMsg = 'El analisis devolvio un formato inesperado. Reintenta.';
+    res.status(500).json({ error: errMsg });
   } finally {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
